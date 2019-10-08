@@ -30,9 +30,6 @@ from shapely.geometry import Point, Polygon
 from shapely.geometry.polygon import LinearRing, LineString
 from datetime import datetime
 
-
-EPISODE_PER_ITER = 20
-
 def load_data(fname):
     data = []
     with open(fname, 'r') as f:
@@ -42,7 +39,7 @@ def load_data(fname):
                 data.append(",".join(parts))
     return data
 
-def convert_to_pandas(data, wpts=None):
+def convert_to_pandas(data, wpts=None, epi_per_iter=25):
 
     """
     stdout_ = 'SIM_TRACE_LOG:%d,%d,%.4f,%.4f,%.4f,%.2f,%.2f,%d,%.4f,%s,%s,%.4f,%d,%.2f,%s\n' % (
@@ -85,7 +82,7 @@ def convert_to_pandas(data, wpts=None):
         #desired_action = int(parts[10])
         #on_track = 0 if 'False' in parts[12] else 1
         
-        iteration = int(episode / EPISODE_PER_ITER) +1
+        iteration = int(episode / epi_per_iter) +1
         df_list.append((iteration, episode, steps, x, y, yaw, steer, throttle, action, reward, done, all_wheels_on_track, progress,
                         closest_waypoint, track_len, tstamp))
 
@@ -100,7 +97,6 @@ def episode_parser(data, action_map=True, episode_map=True):
     '''
     action_map = {} # Action => [x,y,reward] 
     episode_map = {} # Episode number => [x,y,action,reward] 
-
  
     for d in data[:]:
         parts = d.rstrip().split("SIM_TRACE_LOG:")[-1].split(",")
@@ -169,11 +165,9 @@ def v_color(ob):
 
     return COLOR[ob.is_simple]
 
-
 def plot_coords(ax, ob):
     x, y = ob.xy
     ax.plot(x, y, '.', color='#999999', zorder=1)
-
 
 def plot_bounds(ax, ob):
     x, y = zip(*list((p.x, p.y) for p in ob.boundary))
@@ -234,7 +228,6 @@ def plot_grid_world(episode_df, inner, outer, scale=10.0, plot=True):
         dist += math.sqrt((episode_df['x'].iloc[ii] - episode_df['x'].iloc[ii-1])**2 + (episode_df['y'].iloc[ii] - episode_df['y'].iloc[ii-1])**2)
     dist /= 100.0
 
-   
     t0 = datetime.fromtimestamp(float(episode_df['timestamp'].iloc[0]))
     t1 = datetime.fromtimestamp(float(episode_df['timestamp'].iloc[len(episode_df) - 1]))
 
@@ -249,7 +242,6 @@ def plot_grid_world(episode_df, inner, outer, scale=10.0, plot=True):
     print('Average throttle, velocity = %.2f (Gazebo), %.2f (meters/sec)' % (average_throttle, velocity))
 
     stats.append((dist, lap_time, velocity, average_throttle, min_throttle, max_throttle))
-
 
     if plot == True:
         for y in range(max_y):
@@ -275,3 +267,114 @@ def plot_grid_world(episode_df, inner, outer, scale=10.0, plot=True):
         #plt.savefig('grid.png')
 
     return lap_time, average_throttle, stats
+
+# MODIFIED BLOCK
+def get_track_waypoints(track_name):
+    return np.load("tracks/%s.npy" % track_name)
+
+def plot_track(df, info, track_size=(500, 800), x_offset=0, y_offset=0, details=('reward', 1.0), viewsize=16):
+    '''
+    Each track may have a diff track size, 
+    For reinvent track, use track_size=(500, 800)
+    Tokyo, track_size=(700, 1000)
+    x_offset, y_offset is used to convert to the 0,0 coordinate system
+    '''
+    track = np.zeros(track_size) # lets magnify the track by *100
+    for index, row in df.iterrows():
+        x = int(row["x"]) + x_offset
+        y = int(row["y"]) + y_offset
+        reward = row[details[0]] / details[1]
+        
+        track[y,x] = reward 
+        
+    fig = plt.figure(1, figsize=(viewsize, viewsize * track_size[1] / track_size[0]))
+    ax = fig.add_subplot(111)
+    print_border(ax, info['center_line'], info['inner_border'], info['outer_border'])
+    return track
+
+def plot_top_laps(info, sorted_idx, action_map, episode_map, n_laps=5, offset=(0,0)):
+    fig = plt.figure(n_laps, figsize=(10, 36))
+    for i in range(n_laps):
+        idx = sorted_idx[i]
+        
+        episode_data = episode_map[idx]
+        
+        ax = fig.add_subplot(n_laps,1,i+1)
+        
+        line = LineString(info['center_line'])
+        plot_coords(ax, line)
+        plot_line(ax, line)
+        
+        line = LineString(info['inner_border'])
+        plot_coords(ax, line)
+        plot_line(ax, line)
+
+        line = LineString(info['outer_border'])
+        plot_coords(ax, line)
+        plot_line(ax, line)
+
+
+        for idx in range(1, len(episode_data)-1):
+            x1,y1,action,reward,angle,speed = episode_data[idx]
+            car_x2, car_y2 = x1 - 0.02, y1
+            plt.plot([x1*100+offset[0], car_x2*100+offset[0]], [y1*100+offset[1], car_y2*100+offset[1]], 'b.')
+        
+    return fig
+
+def plot_param_charts(df, name='reward', horizon=None):
+    fig = plt.figure(figsize=(18, 15))
+    ax = fig.add_subplot(311)
+    ax.plot(np.arange(len(df[name])), df[name], '.')
+    if horizon!=None:
+        ax.plot([0, len(df[name])], [horizon, horizon])
+
+    ax = fig.add_subplot(312)
+    itsteps = np.arange(len(df['iteration']))
+    lastiter = 1
+    counter = 0
+    for i in range(0, len(df['iteration'])):
+        if lastiter != df['iteration'][i]:
+            lastiter = df['iteration'][i]
+            counter = 0
+        itsteps[i] = counter
+        counter += 1
+    df_extra = df.join(pd.DataFrame({'stepsum':itsteps}))
+    avg_iter = np.zeros(max(df_extra['stepsum']))
+    for i in range(0, len(avg_iter)):
+        df_slice = df_extra[df_extra['stepsum'] == i]
+        avg_iter[i] = df_slice[name].mean()
+    ax.set_title("Average iteration")
+    ax.plot(np.arange(len(avg_iter)), avg_iter)
+    if horizon!=None:
+        ax.plot([0, len(avg_iter)], [horizon, horizon])
+
+    ax = fig.add_subplot(313)
+    avg_reward = np.zeros(max(df['steps']))
+    for i in range(0, len(avg_reward)):
+        df_slice = df[df['steps'] == i]
+        avg_reward[i] = df_slice[name].mean()
+    ax.set_title("Average episode")
+    ax.plot(np.arange(len(avg_reward)), avg_reward)
+    if horizon!=None:
+        ax.plot([0, len(avg_reward)], [horizon, horizon])
+    
+## Evaluation RUN
+def plot_episode_run(df, info, E, y_offset, note='steps', split=500):
+    fig = plt.figure(1, figsize=(12, 16))
+    ax = fig.add_subplot(211)
+    print_border(ax, info['center_line'], info['inner_border'], info['outer_border']) 
+    episode_data = df[df['episode'] == E]
+    txts = 0
+    for row in episode_data.iterrows():
+        x1,y1,action,reward = row[1]['x'], row[1]['y'], row[1]['action'], row[1]['reward']
+        car_x2, car_y2 = x1 - 0.02, y1
+        plt.plot([x1, car_x2], [y1+y_offset, car_y2+y_offset], 'r.')
+        if txts % split == 0:
+            note_val = row[1][note]
+            if type(note_val) == type(0.0):
+                note_val = round(note_val, 2)
+            ax.annotate(note_val, (x1+2,y1+y_offset+2))
+        txts += 1
+        
+def create_info_set(**kwargs):
+    return kwargs
